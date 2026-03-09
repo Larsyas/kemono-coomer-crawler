@@ -6,238 +6,300 @@ import math
 import os
 
 
+site_list = {
+    'coomer': 'https://coomer.st/artists',
+    'kemono': 'https://kemono.cr/artists',
+    'coomer_raw': 'https://coomer.st',
+    'kemono_raw': 'https://kemono.cr'
+}
+
+
+website_base_url = None
+
+# Escolhe site
+while website_base_url not in ['0', '1']:
+
+    website_base_url = input('which website? (0 = coomer, 1 = kemono) ')
+
+    if website_base_url == '0':
+        website_base_url = site_list['coomer']
+        break
+
+    elif website_base_url == '1':
+        website_base_url = site_list['kemono']
+        break
+
+    else:
+        print('invalid option')
+
+
 user = input('who? ')
 
 USER_DIR = f"downloads/{user}"
 os.makedirs(USER_DIR, exist_ok=True)
 
 
-def get_paginator_status(page: Page):
+def build_page_numbered_url(base_url, page_number):
 
-    sleep(1)
-    page.wait_for_selector('#paginator-top menu a')
+    if page_number == 1:
+        return base_url
 
-    paginator_items = page.locator('#paginator-top menu a')
-    count = paginator_items.count()
-
-    user_pages = []
-
-    for i in range(count):
-        paginator_locator = paginator_items.nth(i)
-
-        text = paginator_locator.inner_text().strip()
-        href = paginator_locator.get_attribute("href")
-
-        if text.isdigit():
-            user_pages.append({
-                "text": int(text),
-                "href": href,
-                "locator": paginator_locator
-            })
-
-    return user_pages
+    offset = (page_number - 1) * 50
+    return f"{base_url}?o={offset}"
 
 
-def download_loop(page: Page):
-    page_posts = []
+def progress_bar(current, total, bar_length=30):
 
-    page_posts_tags_locator = page.locator('.card-list__items article a')
+    progress = current / total
+    filled = int(bar_length * progress)
 
-    page_post_count = page_posts_tags_locator.count()
-    print(page_post_count)
+    bar = "█" * filled + "░" * (bar_length - filled)
 
-    for i in range(page_post_count):
-        actual_post_tbd = page_posts_tags_locator.nth(i)
-        post_title = actual_post_tbd.locator('header').inner_text()
-        
-
-        page_posts.append({
-            "title": post_title,
-            "href": actual_post_tbd.get_attribute('href'),
-            "locator": actual_post_tbd
-        })
+    print(f"\r[{bar}] {current}/{total} posts", end="")
 
 
-    # GET POSTS LIST
-    #######################
-    # PROCEED
-    user_url = page.url
+def download_loop(page_content: Page, page_posts):
+
     user_post_links = []
 
-    x = 1
-    for j in page_posts:
-        # OPENS POST[j]
+    total_posts_page = len(page_posts)
 
-        j['locator'].click()
-        page.wait_for_load_state('domcontentloaded')
-        sleep(2)
+    for index, j in enumerate(page_posts, start=1):
 
+        progress_bar(index, total_posts_page)
+
+        post_url = website_base_url + j['href']
+
+        print(f"\nOpening post {index}/{total_posts_page}: {post_url}")
+
+        page_content.goto(post_url)
+        page_content.wait_for_load_state('domcontentloaded')
+        sleep(1)
 
         try:
-            post_img_files_locator = page.locator('.post__thumbnail figure a')
-            post_url = HTTP_USER + j['href']
 
+            # ---------------------------------------
+            # EXTRAI ID DO POST PARA CRIAR DIRETÓRIOS
+            # ---------------------------------------
+
+            post_id = post_url.split("/")[-1]
+
+            post_dir = os.path.join(USER_DIR, post_id)
+            images_dir = os.path.join(post_dir, "images")
+            videos_dir = os.path.join(post_dir, "videos")
+
+            os.makedirs(images_dir, exist_ok=True)
+            os.makedirs(videos_dir, exist_ok=True)
+
+
+            # ---------------------------------------
+            # DETECTA VIDEOS
+            # ---------------------------------------
+
+            video_locator = page_content.locator("video source")
+            video_count = video_locator.count()
+
+            # fallback caso source não exista
+            if video_count == 0:
+                video_locator = page_content.locator("video")
+                video_count = video_locator.count()
+
+            print(f"{video_count} videos found")
+
+
+            # ---------------------------------------
+            # BAIXA VIDEOS SE EXISTIREM
+            # ---------------------------------------
+
+            for v in range(video_count):
+
+                video_url = video_locator.nth(v).get_attribute("src")
+
+                if not video_url:
+                    continue
+
+                filename = video_url.split("/")[-1].split("?")[0]
+                file_path = os.path.join(videos_dir, filename)
+
+                if os.path.exists(file_path):
+                    print("video already downloaded:", filename)
+                    continue
+
+                print("downloading video:", filename)
+
+                try:
+
+                    response = page_content.request.get(video_url, timeout=60000)
+
+                    with open(file_path, "wb") as f:
+                        f.write(response.body())
+
+                except Exception as video_error:
+                    print("video download failed:", video_error)
+
+
+            # ---------------------------------------
+            # DETECTA IMAGENS
+            # ---------------------------------------
+
+            page_content.wait_for_selector('.post__thumbnail figure a', timeout=5000)
+
+            post_img_files_locator = page_content.locator('.post__thumbnail figure a')
             img_count = post_img_files_locator.count()
 
-            print(f"There is {img_count} img files to be downloaded at post {j['title']}, url {post_url}")
+            print(f"{img_count} images found")
+
+
+            # ---------------------------------------
+            # BAIXA IMAGENS SE EXISTIREM
+            # ---------------------------------------
 
             for img in range(img_count):
 
                 actual_img_tbd = post_img_files_locator.nth(img)
                 img_url = actual_img_tbd.get_attribute('href')
 
-                if img_url is None:
+                if not img_url:
                     continue
 
                 filename = img_url.split("/")[-1].split("?")[0]
-                file_path = os.path.join(USER_DIR, filename)
+                file_path = os.path.join(images_dir, filename)
 
                 if os.path.exists(file_path):
-                    print('already downloaded:', filename)
+                    print("already downloaded:", filename)
                     continue
 
-                print('downloading:', img_url)
+                print("downloading:", filename)
 
-                response = page.request.get(img_url)
+                try:
 
-                with open(file_path, "wb") as f:
-                    f.write(response.body())
+                    response = page_content.request.get(img_url, timeout=30000)
 
-                # sleep(2)
+                    with open(file_path, "wb") as f:
+                        f.write(response.body())
 
-            
+                except Exception as img_error:
+
+                    print("download failed:", img_error)
+                    continue
+
+
             user_post_links.append({
                 'imgs': img_count,
+                'videos': video_count,
                 'post_url': post_url
             })
-            
-
 
         except Exception as e:
-            return print(e)
 
-        sleep(2)
-        page.goto(url=user_url)
-        page.wait_for_load_state('domcontentloaded')
-        x += 1
+            print("error reading post:", e)
 
+
+        # salva lista de posts analisados
         with open('lista.json', 'w', encoding='utf-8') as f:
             json.dump(user_post_links, f, indent=4, ensure_ascii=False)
 
-        if x > 50:
-            print('cabeii')
-            sleep(1208312)
 
-
-
-
-
-HTTP_USER = 'https://kemono.cr'
 
 with sync_playwright() as pw:
-    nav = pw.chromium.launch(headless=True)
+
+    nav = pw.chromium.launch(headless=False)
 
     page = nav.new_page()
-    page.goto(url='https://kemono.cr/artists', timeout=100000)
-    # print(page.content())
 
-    # Searches for user
-    page.get_by_placeholder(text='Search...').fill(user)
+    page.goto(url=website_base_url, timeout=100000)
+
+
+    if website_base_url == site_list['coomer']:
+        website_base_url = site_list['coomer_raw']
+    else:
+        website_base_url = site_list['kemono_raw']
+
+
+    page.get_by_placeholder('Search...').fill(user)
+
     sleep(3)
 
-    # Finds the search result
     user_profile = page.get_by_text(user).first
 
     if user_profile:
+
         user_profile.click()
+        page.wait_for_url("**/user/**")
+
     else:
-        print(f"Couldn't find any {user}.")
+
+        print(f"Couldn't find {user}")
         nav.close()
-
-    # Necessary time for the page to load completely
-    sleep(3)
+        exit()
 
 
-    # Locates paginator
-    try:
-        has_paginator = page.locator(selector='small')
+    sleep(2)
 
-        # If paginator exists
-        if has_paginator.count() > 0:
+    user_profile_url = page.url.split("?")[0]
 
-
-            page.wait_for_selector('#paginator-top small')
-            user_posts_data_locator = page.locator('#paginator-top small')
-            user_posts_data_raw = user_posts_data_locator.inner_html()
-
-            # Separates correct number of user posts from page string
-            user_posts_num = int(re.findall(r'\d+', user_posts_data_raw)[-1])
-            print(f'{user} has {user_posts_num} posts, you can check..')
-
-            # Determinates the number os pages based on posts number
-            page_number = math.ceil(user_posts_num / 50)
-            last_page_posts_num = user_posts_num % 50 or 50
-            print(f'Also, this one has {page_number} pages to go through, and youll find {last_page_posts_num} posts os last page.')
+    print("Profile URL:", user_profile_url)
 
 
-            # Waits for element to load on page
-            page.wait_for_selector('#paginator-top menu a')
-
-            paginator_menu = page.locator('#paginator-top menu')
-
-            paginator_items = paginator_menu.locator('a')
-            page_count = paginator_items.count()
-
-            user_pages = []
-
-            for i in range(page_count):
-                paginator_locator = paginator_items.nth(i)
-                paginator_text_raw = paginator_locator.inner_html()
-                page_link = paginator_locator.get_attribute('href')
-
-                # 1. Busca o padrão <b>numero</b>
-                # \d+ captura um ou mais dígitos
-                match = re.search(r'<b>(\d+)</b>', paginator_text_raw)
-
-                # Verifica se o padrão foi encontrado
-                if match:
-                    # 2. Extrai apenas o que está dentro dos parênteses (\d+)
-                    clean_text = match.group(1)
-
-                    user_pages.append({
-                        "text": clean_text,
-                        "href": page_link,
-                        "locator": paginator_locator,
-                    })
-                
-            page.wait_for_load_state('domcontentloaded')
-
-            # THIS IS HOW IT CLICKS OTHER PAGES
-            # user_pages[9]["locator"].click()
-
-            # THIS IS HOW THE PAGINATOR GETS UPLOADED
-            # user_pages = get_paginator_status(page)
+    small_locator = page.locator('#paginator-top small')
+    has_page_info = small_locator.count() > 0
 
 
-            ### STARTING DOWNLOAD PROCESS
-            # AT FIRST PAGE:
-            download_loop(page)
+    if has_page_info:
 
-        
+        user_posts_data_raw = small_locator.inner_text()
+
+        user_posts_num = int(re.findall(r'\d+', user_posts_data_raw)[-1])
+
+        print(f'{user} has {user_posts_num} posts')
+
+        num_user_pages = math.ceil(user_posts_num / 50)
+
+        print(f'{num_user_pages} pages total')
+
+    else:
+
+        print('no paginator found')
+
+        num_user_pages = 1
 
 
+    for p in range(1, num_user_pages + 1):
 
-        else:
-            print('theres no paginator')
-            pass
+        page_url = build_page_numbered_url(user_profile_url, p)
+
+        print("\n====================")
+        print("Page", p, "of", num_user_pages)
+        print(page_url)
+
+        page.goto(page_url)
+        page.wait_for_load_state('domcontentloaded')
+
+        sleep(2)
+
+        page_posts = []
+
+        page_posts_tags_locator = page.locator('.card-list__items article a')
+        page_post_count = page_posts_tags_locator.count()
+
+        print(page_post_count, "posts on this page")
+
+        for i in range(page_post_count):
+
+            actual_post_tbd = page_posts_tags_locator.nth(i)
+
+            post_title = actual_post_tbd.locator('header').inner_text()
+
+            page_posts.append({
+                "title": post_title,
+                "href": actual_post_tbd.get_attribute('href')
+            })
 
 
+        download_loop(page, page_posts)
 
+    print("\n\nFinished.")
 
-    except Exception as e:
-        print(e)
+    sleep(10)
 
-
-
-    sleep(300)
     nav.close()
