@@ -203,7 +203,7 @@ def download_loop(page_content: Page, page_posts):
 
 with sync_playwright() as pw:
 
-    nav = pw.chromium.launch(headless=False)
+    nav = pw.chromium.launch(headless=True)
 
     page = nav.new_page()
 
