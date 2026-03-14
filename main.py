@@ -1,305 +1,274 @@
-from playwright.sync_api import sync_playwright, Page
-from time import sleep
-import json
-import re
-import math
 import os
+import re
+import time
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+MAX_THREADS = 10
+MAX_RETRIES = 5
 
-site_list = {
-    'coomer': 'https://coomer.st/artists',
-    'kemono': 'https://kemono.cr/artists',
-    'coomer_raw': 'https://coomer.st',
-    'kemono_raw': 'https://kemono.cr'
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/css"
 }
 
+session = requests.Session()
+session.headers.update(HEADERS)
 
-website_base_url = None
+VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".hevc")
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
-# Escolhe site
-while website_base_url not in ['0', '1']:
 
-    website_base_url = input('which website? (0 = coomer, 1 = kemono) ')
+def sanitize_filename(name):
+    name = name.strip()
+    return re.sub(r'[\\/*?:"<>|]', "", name)
 
-    if website_base_url == '0':
-        website_base_url = site_list['coomer']
-        break
 
-    elif website_base_url == '1':
-        website_base_url = site_list['kemono']
-        break
+def choose_source():
+    print("Escolha a fonte:")
+    print("1 - Kemono")
+    print("2 - Coomer")
 
+    option = input("Opção: ").strip()
+
+    if option == "1":
+        return "kemono.cr"
+    elif option == "2":
+        return "coomer.st"
     else:
-        print('invalid option')
-
-
-user = input('who? ')
-
-USER_DIR = f"downloads/{user}"
-os.makedirs(USER_DIR, exist_ok=True)
-
-
-def build_page_numbered_url(base_url, page_number):
-
-    if page_number == 1:
-        return base_url
-
-    offset = (page_number - 1) * 50
-    return f"{base_url}?o={offset}"
-
-
-def progress_bar(current, total, bar_length=30):
-
-    progress = current / total
-    filled = int(bar_length * progress)
-
-    bar = "█" * filled + "░" * (bar_length - filled)
-
-    print(f"\r[{bar}] {current}/{total} posts", end="")
-
-
-def download_loop(page_content: Page, page_posts):
-
-    user_post_links = []
-
-    total_posts_page = len(page_posts)
-
-    for index, j in enumerate(page_posts, start=1):
-
-        progress_bar(index, total_posts_page)
-
-        post_url = website_base_url + j['href']
-
-        print(f"\nOpening post {index}/{total_posts_page}: {post_url}")
-
-        page_content.goto(post_url)
-        page_content.wait_for_load_state('domcontentloaded')
-        sleep(1)
-
-        try:
-
-            # ---------------------------------------
-            # EXTRAI ID DO POST PARA CRIAR DIRETÓRIOS
-            # ---------------------------------------
-
-            post_id = post_url.split("/")[-1]
-
-            post_dir = os.path.join(USER_DIR, post_id)
-            images_dir = os.path.join(post_dir, "images")
-            videos_dir = os.path.join(post_dir, "videos")
-
-            os.makedirs(images_dir, exist_ok=True)
-            os.makedirs(videos_dir, exist_ok=True)
-
-
-            # ---------------------------------------
-            # DETECTA VIDEOS
-            # ---------------------------------------
-
-            video_locator = page_content.locator("video source")
-            video_count = video_locator.count()
-
-            # fallback caso source não exista
-            if video_count == 0:
-                video_locator = page_content.locator("video")
-                video_count = video_locator.count()
-
-            print(f"{video_count} videos found")
-
-
-            # ---------------------------------------
-            # BAIXA VIDEOS SE EXISTIREM
-            # ---------------------------------------
-
-            for v in range(video_count):
-
-                video_url = video_locator.nth(v).get_attribute("src")
-
-                if not video_url:
-                    continue
-
-                filename = video_url.split("/")[-1].split("?")[0]
-                file_path = os.path.join(videos_dir, filename)
-
-                if os.path.exists(file_path):
-                    print("video already downloaded:", filename)
-                    continue
-
-                print("downloading video:", filename)
-
-                try:
-
-                    response = page_content.request.get(video_url, timeout=60000)
-
-                    with open(file_path, "wb") as f:
-                        f.write(response.body())
-
-                except Exception as video_error:
-                    print("video download failed:", video_error)
-
-
-            # ---------------------------------------
-            # DETECTA IMAGENS
-            # ---------------------------------------
-
-            page_content.wait_for_selector('.post__thumbnail figure a', timeout=5000)
-
-            post_img_files_locator = page_content.locator('.post__thumbnail figure a')
-            img_count = post_img_files_locator.count()
-
-            print(f"{img_count} images found")
-
-
-            # ---------------------------------------
-            # BAIXA IMAGENS SE EXISTIREM
-            # ---------------------------------------
-
-            for img in range(img_count):
-
-                actual_img_tbd = post_img_files_locator.nth(img)
-                img_url = actual_img_tbd.get_attribute('href')
-
-                if not img_url:
-                    continue
-
-                filename = img_url.split("/")[-1].split("?")[0]
-                file_path = os.path.join(images_dir, filename)
-
-                if os.path.exists(file_path):
-                    print("already downloaded:", filename)
-                    continue
-
-                print("downloading:", filename)
-
-                try:
-
-                    response = page_content.request.get(img_url, timeout=30000)
-
-                    with open(file_path, "wb") as f:
-                        f.write(response.body())
-
-                except Exception as img_error:
-
-                    print("download failed:", img_error)
-                    continue
-
-
-            user_post_links.append({
-                'imgs': img_count,
-                'videos': video_count,
-                'post_url': post_url
-            })
-
-        except Exception as e:
-
-            print("error reading post:", e)
-
-
-        # salva lista de posts analisados
-        with open('lista.json', 'w', encoding='utf-8') as f:
-            json.dump(user_post_links, f, indent=4, ensure_ascii=False)
-
-
-
-with sync_playwright() as pw:
-
-    nav = pw.chromium.launch(headless=True)
-
-    page = nav.new_page()
-
-    page.goto(url=website_base_url, timeout=100000)
-
-
-    if website_base_url == site_list['coomer']:
-        website_base_url = site_list['coomer_raw']
-    else:
-        website_base_url = site_list['kemono_raw']
-
-
-    page.get_by_placeholder('Search...').fill(user)
-
-    sleep(3)
-
-    user_profile = page.get_by_text(user).first
-
-    if user_profile:
-
-        user_profile.click()
-        page.wait_for_url("**/user/**")
-
-    else:
-
-        print(f"Couldn't find {user}")
-        nav.close()
+        print("Opção inválida.")
         exit()
 
 
-    sleep(2)
+def detect_extension(filepath):
 
-    user_profile_url = page.url.split("?")[0]
+    with open(filepath, "rb") as f:
+        header = f.read(64)
 
-    print("Profile URL:", user_profile_url)
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+
+    if header.startswith(b"\x89PNG"):
+        return ".png"
+
+    if header.startswith(b"GIF"):
+        return ".gif"
+
+    if header.startswith(b"RIFF") and b"WEBP" in header:
+        return ".webp"
+
+    if b"ftyp" in header:
+        return ".mp4"
+
+    if header.startswith(b"PK"):
+        return ".zip"
+
+    return None
 
 
-    small_locator = page.locator('#paginator-top small')
-    has_page_info = small_locator.count() > 0
+def fetch_creators(domain):
+
+    print("\nBaixando lista de criadores...")
+
+    url = f"https://{domain}/api/v1/creators"
+
+    r = session.get(url, timeout=30)
+
+    if r.status_code != 200:
+        print("Erro ao baixar creators:", r.status_code)
+        exit()
+
+    creators = r.json()
+
+    print(f"Creators carregados: {len(creators)}")
+
+    return creators
 
 
-    if has_page_info:
+def find_creator(creators, name):
 
-        user_posts_data_raw = small_locator.inner_text()
+    name = name.lower().strip()
 
-        user_posts_num = int(re.findall(r'\d+', user_posts_data_raw)[-1])
+    for creator in creators:
 
-        print(f'{user} has {user_posts_num} posts')
+        creator_name = str(creator.get("name", "")).lower().strip()
 
-        num_user_pages = math.ceil(user_posts_num / 50)
+        if name in creator_name:
+            return (
+                creator["service"],
+                creator["id"],
+                creator["name"].strip()
+            )
 
-        print(f'{num_user_pages} pages total')
+    return None, None, None
+
+
+def fetch_posts(domain, service, creator_id):
+
+    posts = []
+    offset = 0
+
+    print("\nBuscando posts...")
+
+    while True:
+
+        url = f"https://{domain}/api/v1/{service}/user/{creator_id}/posts?o={offset}"
+
+        r = session.get(url, timeout=30)
+
+        if r.status_code != 200:
+            break
+
+        data = r.json()
+
+        if not data:
+            break
+
+        posts.extend(data)
+        offset += 50
+
+        print(f"Posts coletados: {len(posts)}")
+
+    return posts
+
+
+def collect_files(posts, domain):
+
+    files = []
+
+    for post in posts:
+
+        if post.get("file"):
+            path = post["file"]["path"]
+            files.append(f"https://{domain}/data{path}")
+
+        if post.get("attachments"):
+            for att in post["attachments"]:
+                path = att["path"]
+                files.append(f"https://{domain}/data{path}")
+
+    return files
+
+
+def download_file(url, folder):
+
+    filename = url.split("/")[-1]
+    filepath = os.path.join(folder, filename)
+
+    if os.path.exists(filepath):
+        return
+
+    for attempt in range(1, MAX_RETRIES + 1):
+
+        try:
+
+            r = session.get(url, stream=True, timeout=(10, 120))
+
+            if r.status_code != 200:
+                raise Exception(f"HTTP {r.status_code}")
+
+            with open(filepath, "wb") as f:
+                for chunk in r.iter_content(8192):
+                    if chunk:
+                        f.write(chunk)
+
+            # detectar extensão real
+            ext_detected = detect_extension(filepath)
+
+            if ext_detected:
+
+                name, old_ext = os.path.splitext(filepath)
+
+                if old_ext.lower() != ext_detected:
+
+                    new_path = name + ext_detected
+
+                    if not os.path.exists(new_path):
+                        try:
+                            os.rename(filepath, new_path)
+                            filepath = new_path
+                        except OSError:
+                            pass
+
+            print("Baixado:", os.path.basename(filepath))
+            return
+
+        except Exception as e:
+
+            print(f"Erro tentativa {attempt}: {e}")
+
+            if attempt < MAX_RETRIES:
+                wait = attempt * 2
+                print(f"Tentando novamente em {wait}s...")
+                time.sleep(wait)
+            else:
+                print("Falha definitiva:", url)
+
+
+def worker(url):
+
+    lower = url.lower()
+
+    if lower.endswith(VIDEO_EXT):
+        download_file(url, VIDEOS_DIR)
+
+    elif lower.endswith(IMAGE_EXT):
+        download_file(url, IMAGES_DIR)
 
     else:
-
-        print('no paginator found')
-
-        num_user_pages = 1
+        download_file(url, FILES_DIR)
 
 
-    for p in range(1, num_user_pages + 1):
+def download_all(files):
 
-        page_url = build_page_numbered_url(user_profile_url, p)
+    print("\nArquivos encontrados:", len(files))
+    print("Iniciando downloads...\n")
 
-        print("\n====================")
-        print("Page", p, "of", num_user_pages)
-        print(page_url)
+    with ThreadPoolExecutor(MAX_THREADS) as executor:
 
-        page.goto(page_url)
-        page.wait_for_load_state('domcontentloaded')
+        futures = [executor.submit(worker, url) for url in files]
 
-        sleep(2)
-
-        page_posts = []
-
-        page_posts_tags_locator = page.locator('.card-list__items article a')
-        page_post_count = page_posts_tags_locator.count()
-
-        print(page_post_count, "posts on this page")
-
-        for i in range(page_post_count):
-
-            actual_post_tbd = page_posts_tags_locator.nth(i)
-
-            post_title = actual_post_tbd.locator('header').inner_text()
-
-            page_posts.append({
-                "title": post_title,
-                "href": actual_post_tbd.get_attribute('href')
-            })
+        for future in as_completed(futures):
+            future.result()
 
 
-        download_loop(page, page_posts)
+# ============================
+# EXECUÇÃO
+# ============================
 
-    print("\n\nFinished.")
+domain = choose_source()
 
-    sleep(10)
+creator_input = input("\nDigite o nome do criador: ").strip()
 
-    nav.close()
+creators = fetch_creators(domain)
+
+service, creator_id, creator_name = find_creator(creators, creator_input)
+
+if not creator_id:
+    print("Criador não encontrado.")
+    exit()
+
+print("\nCreator encontrado:")
+print("Nome:", creator_name)
+print("Service:", service)
+print("ID:", creator_id)
+
+creator_name = sanitize_filename(creator_name)
+
+BASE_DIR = os.path.join("downloads", creator_name)
+
+VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
+IMAGES_DIR = os.path.join(BASE_DIR, "images")
+FILES_DIR = os.path.join(BASE_DIR, "files")
+
+os.makedirs(VIDEOS_DIR, exist_ok=True)
+os.makedirs(IMAGES_DIR, exist_ok=True)
+os.makedirs(FILES_DIR, exist_ok=True)
+
+posts = fetch_posts(domain, service, creator_id)
+
+files = collect_files(posts, domain)
+
+download_all(files)
+
+print("\nDownload finalizado.")
