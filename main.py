@@ -4,7 +4,7 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-MAX_THREADS = 10
+MAX_THREADS = 5
 MAX_RETRIES = 5
 
 HEADERS = {
@@ -93,7 +93,7 @@ def find_creator(creators, name):
 
         creator_name = str(creator.get("name", "")).lower().strip()
 
-        if name in creator_name:
+        if name == creator_name:
             return (
                 creator["service"],
                 creator["id"],
